@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: the plot's time axis and the plotted samples were shifted by the computer's UTC offset (e.g. two hours
+  in Belgian summer time). The TUI plot labelled a 12:00–13:00 range as 14:00–15:00, and the samples were drawn
+  outside the selected range, so a short range could look empty.
+
+### Changed
+
+- must-tui now works in UTC everywhere, whatever the computer's timezone: the time range fields, `now`, `today`,
+  `yesterday`, `tomorrow`, the presets and the startup range, and the sample timestamps, also those returned by
+  the Python helpers such as `get_parameter_series()` (previously local time).
+
+### Added
+
+- The time range fields accept `start` and `end` (the current range's start and end) with an optional offset,
+  e.g. `end-6h` in the start field for the 6 hours up to the current end, or `start+90m` in the end field. An
+  expression on the other end keeps that end fixed, even with Lock on.
+
+- A **Range…** button (also `F6`) opens a list of time ranges to pick from: the last hour, 6 hours, 24 hours,
+  3, 7 and 30 days, today, yesterday, the selected parameter's data range on MUST, the last hour, 6 hours, …,
+  30 days of that parameter's data (ending at its last sample instead of now), and the 10 most recently used
+  ranges. It replaces the **Data Range** button, whose function is now the "Parameter data range" entry.
+
+### Changed
+
+- The app now starts with the time range used last, instead of a fixed 2 to 5 December 2025. The first time, it
+  starts with the last day up to now. Recent ranges are saved in `time_ranges.json` in the cache directory.
+
 ## [0.5.0] - 2026-10-12
 
 ### Added

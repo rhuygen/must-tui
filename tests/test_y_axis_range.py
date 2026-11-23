@@ -16,7 +16,7 @@ def _app_with_range(start, end):
 
 
 def _ms(*args):
-    return int(dt.datetime(*args).timestamp() * 1000)
+    return int(dt.datetime(*args, tzinfo=dt.timezone.utc).timestamp() * 1000)  # MUST's epoch ms; must-tui is UTC
 
 
 class _FakePlotter:

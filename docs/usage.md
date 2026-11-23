@@ -138,10 +138,31 @@ A toolbar between the info panels and the plot area:
 |---|---|
 | **Clear Plot** button | Remove all plotted traces |
 | **Plot: TUI / Plot: Matplotlib** button | Toggle between the built-in TUI plot and an external Matplotlib window |
-| **Data Range** button | Set the time range to the selected parameter's first and last sample, as reported by MUST |
+| **Range…** button (`F6`) | Pick a time range from presets, the selected parameter's data range, or recently used ranges |
 | **Y Range** button | Set an explicit Y-axis minimum and maximum, or go back to auto-scaling |
-| **Start → End** fields | Set the start and end time for data retrieval and the plot x-axis |
+| **Start → End** fields | Set the start and end time (UTC) for data retrieval and the plot x-axis |
 | **Lock** checkbox | Keep the duration fixed: changing one end moves the other end along |
+
+The **Range…** button (or `F6`, from anywhere on the main screen) opens a list to pick a time range
+from, with Enter or a click (Escape cancels):
+
+- **Presets**, relative to the moment the list is opened: last hour, last 6 hours, last 24 hours,
+  last 3, 7 and 30 days, today (UTC midnight up to now) and yesterday (midnight to midnight).
+- **Parameter data range**: the selected parameter's first and last sample, as reported by MUST.
+  When there is no such range (no parameter selected yet, or it has no data), the entry says why and
+  can't be selected.
+- **Last hour/6 hours/24 hours/3, 7 and 30 days of data**: the same durations, but ending at the
+  selected parameter's last sample instead of now, for a parameter that stopped reporting a while
+  ago. The start is not clamped to the first sample, so for a parameter with less data than the
+  chosen duration, the plot simply starts empty. Only shown when the parameter data range is available.
+- **Recent**: the 10 most recently applied time ranges, however they were set (typed, picked from
+  this list, …), except the current one.
+
+The recent ranges are saved in `time_ranges.json` in the cache directory (see
+[Environment](env.md)), and the app starts with the most recent one. The very first time, or when
+that file is missing or unreadable, it starts with the last day up to now. A range is always
+remembered as absolute start and end times: picking "Last 6 hours" today and restarting tomorrow
+gives today's 6 hours again, not tomorrow's — pick the preset again for that.
 
 By default the Y-axis auto-scales to fit whatever is currently plotted. The **Y Range** button opens
 a small dialog with **Min** and **Max** fields (pre-filled with the currently plotted data's range,
@@ -150,19 +171,28 @@ than Max), **Auto** (clears the locked range immediately), and **Cancel**. Once 
 it stays in effect — across new parameter selections, time range reloads, and clearing the plot —
 until you choose **Auto** again, for both the TUI and Matplotlib backends.
 
+All times in must-tui are **UTC**: the time range fields, `now`/`today`, the presets, the plot's time
+axis (both the TUI plot and the Matplotlib window) and the sample times, whatever your computer's
+own timezone is.
+
 Type a date-time as `YYYY-MM-DD HH:MM:SS`. Shorter forms are accepted too: `YYYY-MM-DD HH:MM`
 (seconds 0) and `YYYY-MM-DD` (midnight). A field is applied when you press **Enter** or leave it
 (e.g. with **Tab**); typing alone changes nothing. **Escape** leaves the field, committing a
 pending valid edit first, the same as **Tab**.
 
-Relative forms are also accepted, resolved against the current local time:
+Relative forms are also accepted, resolved against the current UTC time:
 
-- `now`, `today`, `yesterday`, `tomorrow` — `today`/`yesterday`/`tomorrow` snap to local midnight;
+- `now`, `today`, `yesterday`, `tomorrow` — `today`/`yesterday`/`tomorrow` snap to UTC midnight;
   `now` keeps the current time, to the second.
 - Any of those with a signed offset, e.g. `now-6h`, `tomorrow+1d`, `yesterday-3h`. The offset uses
   `w`eeks, `d`ays, `h`ours, `m`inutes and `s`econds, and they can be combined: `now-1d2h30m`.
 - A bare offset such as `-2h30m` or `+1w` is relative to `now`. The sign is required (`6h` alone is
   rejected as ambiguous).
+- `start` and `end` are the current time range's start and end (as they were before this edit), with
+  or without an offset: `end-6h` in the start field gives the 6 hours up to the current end,
+  `start+90m` in the end field the 90 minutes from the current start. An expression on the *other*
+  end keeps that end where it is, even with **Lock** on; with Lock on, an expression on the field's
+  own end (e.g. `start+1d` in the start field) moves the whole range, as any other edit would.
 
 **↑ / ↓** step the date-time component the cursor is on (year, month, day, hour, minute, second) up
 or down by one, directly in the field's text — without applying it, so pending edits are still only
@@ -225,6 +255,7 @@ regardless of where focus is:
 | `F4` | Toggle light / dark mode |
 | `F5` | Soft-refresh the parameter cache (fetches from server, keeps SQLite cache) |
 | `Ctrl+R` | Hard-reset the parameter cache (wipes SQLite cache, then re-fetches) |
+| `F6` | Choose a time range: presets, the selected parameter's data range, or a recently used range |
 
 Only the first four (`F1`, `Ctrl+Q`, `Ctrl+L`, `Ctrl+Z`) are shown in the footer, to keep it short;
 the rest still work exactly the same, they're just not advertised there. The full table — generated

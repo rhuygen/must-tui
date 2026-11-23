@@ -44,6 +44,9 @@ Cache database location:
 - If `XDG_CACHE_HOME` is not set:
   - `~/.cache/must-tui/parameters.sqlite3`
 
+The recently used time ranges (the app starts with the most recent one) are saved next to it, in
+`time_ranges.json`. Deleting that file is harmless: the app then starts with the last day up to now.
+
 ## Example: temporary shell session
 
 ```bash

@@ -858,7 +858,7 @@ def get_raw_data_with_timestamp(data: dict) -> tuple[list[datetime.datetime], li
         data (dict): The parameter data dictionary as returned by get_parameter_data().
 
     Returns:
-        A list of tuples containing datetime objects and raw integer values.
+        A list of tuples containing datetime objects (naive, in UTC) and raw integer values.
     """
     timestamps = []
     raw_values = []
@@ -869,7 +869,12 @@ def get_raw_data_with_timestamp(data: dict) -> tuple[list[datetime.datetime], li
 
     for content in data.get("content", []):
         for entry in content.get("data", []):
-            timestamp = datetime.datetime.fromtimestamp(int(entry["date"]) / 1000)
+            # MUST's sample time is epoch milliseconds; keep it as naive UTC, like every date-time in must-tui
+            # (the time ranges sent to MUST are UTC too). A plain fromtimestamp() would give local time, which
+            # put the samples outside the plotted range by the local UTC offset.
+            timestamp = datetime.datetime.fromtimestamp(int(entry["date"]) / 1000, tz=datetime.timezone.utc).replace(
+                tzinfo=None
+            )
             raw_value = entry["value"]
             timestamps.append(timestamp)
             raw_values.append(raw_value)

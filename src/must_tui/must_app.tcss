@@ -238,3 +238,41 @@ YAxisRangeDialog > Vertical {
         }
     }
 }
+
+TimeRangeDialog {
+    align: center middle;
+}
+
+TimeRangeDialog > Vertical {
+    border: thick $primary 50%;
+    /* Just wide enough for one option line (22-column name + "start → end", 63 columns) not to wrap, even with
+       the list's vertical scrollbar shown (short terminals); hence also the narrow horizontal padding. */
+    width: 74;
+    max-width: 100%;
+    height: auto;
+    max-height: 90%;
+    background: $boost;
+    padding: 1 1;
+
+    Label {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #lbl-time-range-current {
+        text-style: none;
+    }
+
+    /* 1fr + the box's max-height: the list shrinks (and scrolls) in a short terminal, keeping Cancel visible. */
+    OptionList {
+        width: 100%;
+        height: 1fr;
+        max-height: 32;
+    }
+
+    Horizontal {
+        height: 3;
+        margin-top: 1;
+        align: center middle;
+    }
+}

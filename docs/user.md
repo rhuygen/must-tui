@@ -179,8 +179,8 @@ Arguments:
 
 - `parameter_names` (`str | list[str]`): One parameter name or a list of names.
 - `data_provider` (`str`): Provider name used for data retrieval.
-- `start` (`str | datetime | None`): Optional start time.
-- `end` (`str | datetime | None`): Optional end time.
+- `start` (`str | datetime | None`): Optional start time, in UTC.
+- `end` (`str | datetime | None`): Optional end time, in UTC.
 - `ctx` (`MustContext | None`): Optional authenticated context.
 
 If `start` and `end` are omitted, the helper uses metadata bounds
@@ -189,4 +189,4 @@ If `start` and `end` are omitted, the helper uses metadata bounds
 Returns:
 
 - `dict[str, list[tuple[datetime, float | int]]]`: Mapping of parameter name to
-  `(timestamp, value)` samples.
+  `(timestamp, value)` samples. The timestamps are naive `datetime`s in UTC.

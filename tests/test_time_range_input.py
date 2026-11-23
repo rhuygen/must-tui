@@ -5,11 +5,20 @@ import pytest
 from textual import on
 from textual.app import App
 from textual.screen import Screen
-from textual.widgets import Button, Checkbox, Input
+from textual.widgets import Button, Checkbox, Input, OptionList
 
 import must_tui.must_app as must_app
 from must_tui.must_app import ParameterMetadata
-from must_tui.time_range_input import TimeRange, TimeRangeInput, format_datetime, parse_datetime
+from must_tui.dialogs import TimeRangeDialog
+from must_tui.time_range_input import (
+    TimeRange,
+    TimeRangeInput,
+    format_datetime,
+    parse_datetime,
+    relative_anchor,
+    utc_now,
+)
+from must_tui.time_ranges import load_recent_time_ranges
 
 START = dt.datetime(2025, 12, 2)
 END = dt.datetime(2025, 12, 5)
@@ -72,6 +81,47 @@ def test_parse_datetime_rejects(text):
 def test_parse_datetime_rejects_relative_out_of_range(text):
     with pytest.raises(ValueError, match="out of range"):
         parse_datetime(text, now=NOW)
+
+
+RANGE = TimeRange(dt.datetime(2025, 12, 2, 8), dt.datetime(2025, 12, 5, 20, 30))
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("start", dt.datetime(2025, 12, 2, 8)),
+        ("END", dt.datetime(2025, 12, 5, 20, 30)),
+        ("end-6h", dt.datetime(2025, 12, 5, 14, 30)),
+        ("end - 1d 30m", dt.datetime(2025, 12, 4, 20)),
+        ("start+90m", dt.datetime(2025, 12, 2, 9, 30)),
+        ("Start+1w", dt.datetime(2025, 12, 9, 8)),
+        # the existing anchors are unaffected by a given range
+        ("now-6h", dt.datetime(2026, 10, 11, 3, 30, 15)),
+        ("-2h30m", dt.datetime(2026, 10, 11, 7, 0, 15)),
+    ],
+)
+def test_parse_datetime_accepts_start_and_end_anchors_with_a_range(text, expected):
+    assert parse_datetime(text, now=NOW, time_range=RANGE) == expected
+
+
+@pytest.mark.parametrize("text", ["start", "end-6h", "start+1d"])
+def test_parse_datetime_rejects_start_and_end_without_a_range(text):
+    with pytest.raises(ValueError, match="only be used in the time range fields"):
+        parse_datetime(text, now=NOW)
+
+
+@pytest.mark.parametrize("text", ["starting", "ends", "end6h", "end-", "end-6x"])
+def test_parse_datetime_rejects_malformed_start_and_end_expressions(text):
+    with pytest.raises(ValueError, match="not a valid date-time"):
+        parse_datetime(text, now=NOW, time_range=RANGE)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [("end-6h", "end"), (" START + 1d ", "start"), ("-2h", "now"), ("today", "today"), ("2025-01-01", None)],
+)
+def test_relative_anchor(text, expected):
+    assert relative_anchor(text) == expected
 
 
 class _Host(App):
@@ -169,6 +219,70 @@ def test_lock_beyond_the_last_year_is_rejected():
         field, _ = await _type_into(pilot, "#time-range-start", "9999-12-31")
         assert app.changes == []
         assert field.has_class("-invalid")
+
+    _run(test)
+
+
+def test_end_anchor_in_the_start_field():
+    async def test(app, pilot):
+        await _type_into(pilot, "#time-range-start", "end-6h")
+        assert app.changes == [TimeRange(END - dt.timedelta(hours=6), END)]
+        assert app.query_one("#time-range-start", Input).value == format_datetime(END - dt.timedelta(hours=6))
+
+    _run(test)
+
+
+def test_start_anchor_in_the_end_field():
+    async def test(app, pilot):
+        await _type_into(pilot, "#time-range-end", "start+90m")
+        assert app.changes == [TimeRange(START, START + dt.timedelta(minutes=90))]
+
+    _run(test)
+
+
+def test_an_anchor_on_the_other_end_keeps_that_end_even_when_locked():
+    async def test(app, pilot):
+        app.query_one("#time-range-lock", Checkbox).value = True
+        await _type_into(pilot, "#time-range-start", "end-6h")
+        await _type_into(pilot, "#time-range-end", "start+1h")
+        assert app.changes == [
+            TimeRange(END - dt.timedelta(hours=6), END),
+            TimeRange(END - dt.timedelta(hours=6), END - dt.timedelta(hours=5)),
+        ]
+
+    _run(test)
+
+
+def test_an_anchor_on_the_same_end_with_lock_shifts_the_whole_range():
+    async def test(app, pilot):
+        app.query_one("#time-range-lock", Checkbox).value = True
+        await _type_into(pilot, "#time-range-start", "start+1d")
+        assert app.changes == [TimeRange(START + dt.timedelta(days=1), END + dt.timedelta(days=1))]
+
+    _run(test)
+
+
+def test_start_anchor_in_the_start_field_beyond_the_end_is_rejected():
+    async def test(app, pilot):
+        field, _ = await _type_into(pilot, "#time-range-start", "end+1h")
+        assert app.changes == []
+        assert field.has_class("-invalid")
+
+    _run(test)
+
+
+def test_stepping_an_end_anchored_expression_materializes_it_first():
+    async def test(app, pilot):
+        field = app.query_one("#time-range-start", Input)
+        field.focus()
+        await pilot.pause()
+        field.value = "end-6h"
+        field.cursor_position = 2  # year segment (the raw text is too short to put the cursor on the hour)
+        await pilot.press("up")
+        await pilot.pause()
+        # resolved against the range's end first (END - 6h), then Up increments the year under the cursor
+        assert field.value == format_datetime((END - dt.timedelta(hours=6)).replace(year=END.year + 1))
+        assert app.changes == []
 
     _run(test)
 
@@ -337,7 +451,7 @@ def test_stepping_relative_text_materializes_it_first():
         field.focus()
         field.cursor_position = 2  # year segment
         await pilot.pause()
-        today = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
         await pilot.press("up")
         await pilot.pause()
         # "today" (this year, midnight) is materialized first, then Up increments the year under the cursor
@@ -425,7 +539,7 @@ def _app_for_reload(monkeypatch, plotted, server_data, during_fetch=None, trunca
 
 
 def _ms(*args):
-    return int(dt.datetime(*args).timestamp() * 1000)
+    return int(dt.datetime(*args, tzinfo=dt.timezone.utc).timestamp() * 1000)  # MUST's epoch ms; must-tui is UTC
 
 
 def test_reload_fetches_every_plotted_parameter_once_for_the_new_range(monkeypatch):
@@ -497,15 +611,15 @@ def test_reload_notifies_when_a_parameters_data_is_truncated(monkeypatch):
 
 
 class _FakeMainScreen(Screen):
-    """A stand-in for MainScreen with just the widgets `use_parameter_data_range` needs."""
+    """A stand-in for MainScreen with just the widgets `choose_time_range` needs."""
 
     def compose(self):
         yield ParameterMetadata()
-        yield Button("Data Range", id="bt-time-range-data")
+        yield Button("Range…", id="bt-time-range")
         yield TimeRangeInput(START, END, id="time-range")
 
 
-def _app_for_data_range_button(monkeypatch):
+def _app_for_time_range_dialog(monkeypatch):
     async def fake_initialize(self):
         self.install_screen(_FakeMainScreen(), name="main")
         self.push_screen("main")
@@ -515,47 +629,132 @@ def _app_for_data_range_button(monkeypatch):
     return must_app.MUSTApp()
 
 
-async def _run_data_range_button(app, metadata=None):
-    async with app.run_test(size=(120, 20)) as pilot:
-        while not isinstance(app.screen, _FakeMainScreen):
+async def _open_time_range_dialog(app, pilot, metadata=None, via_key=False):
+    while not isinstance(app.screen, _FakeMainScreen):
+        await pilot.pause(0.05)
+    if metadata is not None:
+        await app.screen.query_one(ParameterMetadata).update_metadata("PAR_X", metadata)
+    if via_key:
+        await pilot.press("f6")
+    else:
+        app.screen.query_one("#bt-time-range", Button).press()
+    while not isinstance(app.screen, TimeRangeDialog):
+        await pilot.pause(0.05)
+    return app.screen
+
+
+async def _pick_time_range_option(app, option_id=None, metadata=None, via_key=False):
+    """Open the dialog, select `option_id` (or press Escape when None), and return (dialog options, field text)."""
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        dialog = await _open_time_range_dialog(app, pilot, metadata, via_key)
+        option_list = dialog.query_one(OptionList)
+        options = [option_list.get_option_at_index(i) for i in range(option_list.option_count)]
+        if option_id is None:
+            await pilot.press("escape")
+        else:
+            option_list.highlighted = option_list.get_option_index(option_id)
+            await pilot.press("enter")
+        while isinstance(app.screen, TimeRangeDialog):
             await pilot.pause(0.05)
-        notifications = []
-        app.notify = lambda message, **kwargs: notifications.append((message, kwargs))
-        if metadata is not None:
-            await app.screen.query_one(ParameterMetadata).update_metadata("PAR_X", metadata)
-        app.screen.query_one("#bt-time-range-data", Button).press()
         await pilot.pause()
-        start_field_value = app.screen.query_one("#time-range-start", Input).value
-        return notifications, start_field_value
+        return options, app.screen.query_one("#time-range-start", Input).value
 
 
-def test_data_range_button_uses_the_parameters_first_and_last_sample(monkeypatch):
-    app = _app_for_data_range_button(monkeypatch)
+def test_time_range_dialog_applies_the_parameters_data_range(monkeypatch):
+    app = _app_for_time_range_dialog(monkeypatch)
     metadata = {"first-sample": "2024-01-01 00:00:00", "last-sample": "2024-06-01 12:00:00"}
 
-    notifications, start_field_value = asyncio.run(_run_data_range_button(app, metadata))
+    _, start_field_value = asyncio.run(_pick_time_range_option(app, "data-range", metadata))
 
-    assert notifications == []
     assert app.time_range == TimeRange(dt.datetime(2024, 1, 1), dt.datetime(2024, 6, 1, 12))
     assert start_field_value == "2024-01-01 00:00:00"
     # regression guard: set_xlimits() must not crash plotext on the very first-ever call (before any replot())
     assert app.plot_widget.xlimits == (dt.datetime(2024, 1, 1), dt.datetime(2024, 6, 1, 12))
 
 
-def test_data_range_button_without_a_selected_parameter_warns_and_keeps_the_range(monkeypatch):
-    app = _app_for_data_range_button(monkeypatch)
+@pytest.mark.parametrize(
+    "metadata, reason",
+    [
+        (None, "Select a parameter"),
+        ({"first-sample": "2024-06-01 00:00:00", "last-sample": "2024-01-01 00:00:00"}, "is not before its last"),
+    ],
+)
+def test_time_range_dialog_shows_why_the_data_range_is_unavailable(monkeypatch, metadata, reason):
+    app = _app_for_time_range_dialog(monkeypatch)
 
-    notifications, _ = asyncio.run(_run_data_range_button(app))
+    options, _ = asyncio.run(_pick_time_range_option(app, None, metadata))
+
+    data_range_options = [option for option in options if option and "Parameter data range" in str(option.prompt)]
+    assert len(data_range_options) == 1
+    assert data_range_options[0].disabled
+    assert data_range_options[0].id is None
+    assert reason in str(data_range_options[0].prompt)
+    assert not [option for option in options if option and (option.id or "").startswith("data-preset-")]
+    assert app.time_range == TimeRange(START, END)
+
+
+def test_time_range_dialog_applies_the_last_hours_of_the_parameters_data(monkeypatch):
+    app = _app_for_time_range_dialog(monkeypatch)
+    metadata = {"first-sample": "2024-01-01 00:00:00", "last-sample": "2024-06-01 12:00:00"}
+
+    options, _ = asyncio.run(_pick_time_range_option(app, "data-preset-1", metadata))
+
+    ids = [option.id for option in options if option]
+    assert ids.index("data-range") < ids.index("data-preset-0")  # listed right after the data range
+    assert "Last 6 hours of data" in str(next(o for o in options if o and o.id == "data-preset-1").prompt)
+    assert app.time_range == TimeRange(dt.datetime(2024, 6, 1, 6), dt.datetime(2024, 6, 1, 12))
+
+
+def test_time_range_dialog_applies_a_preset_relative_to_now(monkeypatch):
+    app = _app_for_time_range_dialog(monkeypatch)
+    before = utc_now().replace(microsecond=0)
+
+    options, _ = asyncio.run(_pick_time_range_option(app, "preset-1", via_key=True))  # "Last 6 hours", opened by F6
+
+    after = utc_now()
+    assert "Last 6 hours" in str(next(option for option in options if option and option.id == "preset-1").prompt)
+    assert app.time_range.end - app.time_range.start == dt.timedelta(hours=6)
+    assert before <= app.time_range.end <= after
+
+
+def test_time_range_dialog_escape_keeps_the_range_and_remembers_nothing(monkeypatch):
+    app = _app_for_time_range_dialog(monkeypatch)
+
+    asyncio.run(_pick_time_range_option(app, None))
 
     assert app.time_range == TimeRange(START, END)
-    assert notifications and "Select a parameter" in notifications[0][0]
+    assert load_recent_time_ranges() == []
 
 
-def test_data_range_button_rejects_first_sample_not_before_last_sample(monkeypatch):
-    app = _app_for_data_range_button(monkeypatch)
-    metadata = {"first-sample": "2024-06-01 00:00:00", "last-sample": "2024-01-01 00:00:00"}
+def test_applied_time_ranges_are_remembered_and_offered_as_recent(monkeypatch):
+    app = _app_for_time_range_dialog(monkeypatch)
+    older = TimeRange(dt.datetime(2024, 3, 1), dt.datetime(2024, 3, 2))
+    app.recent_time_ranges = [TimeRange(START, END), older]
 
-    notifications, _ = asyncio.run(_run_data_range_button(app, metadata))
+    options, _ = asyncio.run(_pick_time_range_option(app, "recent-0"))
 
-    assert app.time_range == TimeRange(START, END)
-    assert notifications and "is not before its last sample" in notifications[0][0]
+    recent_prompts = [str(option.prompt) for option in options if option and (option.id or "").startswith("recent-")]
+    # the current range (START..END) is not offered again as a recent one
+    assert recent_prompts == [f"{'Recent':<22}2024-03-01 00:00:00 → 2024-03-02 00:00:00"]
+    assert app.time_range == older
+    assert load_recent_time_ranges() == [older, TimeRange(START, END)]
+
+
+def test_a_typed_time_range_is_remembered_and_used_at_the_next_startup(monkeypatch):
+    app = _app_for_time_range_dialog(monkeypatch)
+    new_end = dt.datetime(2025, 12, 9)
+
+    async def run():
+        async with app.run_test(size=(120, 40)) as pilot:
+            while not isinstance(app.screen, _FakeMainScreen):
+                await pilot.pause(0.05)
+            field = app.screen.query_one("#time-range-end", Input)
+            field.value = format_datetime(new_end)
+            await field.action_submit()
+            await pilot.pause()
+
+    asyncio.run(run())
+
+    assert load_recent_time_ranges() == [TimeRange(START, new_end)]
+    assert must_app.MUSTApp().time_range == TimeRange(START, new_end)

@@ -4,6 +4,9 @@ Two plain text fields and a "Lock" checkbox. A field is only applied when the us
 only when the resulting range is valid; then one `TimeRangeInput.Changed` message is posted. Typing does not send
 anything, so the app never sees half-edited or start-after-end ranges. The Up/Down arrow keys step the date-time
 component under the cursor (year, month, ..., second) in the focused field's text, without applying it.
+All date-times in must-tui are naive `datetime`s in UTC (see `utc_now()`), as are the times typed in the fields.
+In the fields, `start` and `end` can be used as anchors too (e.g. `end-6h` in the start field): they refer to the
+range as it was before the edit.
 """
 
 from __future__ import annotations
@@ -21,6 +24,18 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Checkbox, Input, Label
 
+def utc_now() -> datetime.datetime:
+    """The current time in UTC, as a naive `datetime` like every other date-time in must-tui."""
+
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def utc_timestamp(value: datetime.datetime) -> float:
+    """POSIX timestamp of a naive UTC `datetime` (unlike `value.timestamp()`, which would take it as local time)."""
+
+    return value.replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
 DISPLAY_FORMAT = "%Y-%m-%d %H:%M:%S"
 """Format used to show a date-time in the fields."""
 
@@ -32,7 +47,10 @@ _WORD_OFFSETS = {
     "yesterday": datetime.timedelta(days=-1),
     "tomorrow": datetime.timedelta(days=1),
 }
-"""Anchor words that snap to local midnight. `now` is handled separately, to the second."""
+"""Anchor words that snap to midnight (UTC, like `now`). `now` is handled separately, to the second."""
+
+_RANGE_ANCHORS = ("start", "end")
+"""Anchor words for the current time range's own start and end, only valid when a range is given to resolve them."""
 
 _OFFSET_UNITS = {"w": "weeks", "d": "days", "h": "hours", "m": "minutes", "s": "seconds"}
 """Units accepted in a relative offset. Months/years are excluded: a calendar month or year has no fixed duration."""
@@ -40,25 +58,40 @@ _OFFSET_UNITS = {"w": "weeks", "d": "days", "h": "hours", "m": "minutes", "s": "
 _OFFSET_TOKEN_RE = re.compile(r"(\d+)\s*([wdhms])", re.IGNORECASE)
 
 _RELATIVE_RE = re.compile(
-    r"^(?P<anchor>now|today|yesterday|tomorrow)?"
+    r"^(?P<anchor>now|today|yesterday|tomorrow|start|end)?"
     r"(?:\s*(?P<sign>[+-])\s*(?P<offset>(?:\d+\s*[wdhms]\s*)+))?$",
     re.IGNORECASE,
 )
 """An optional anchor word, optionally followed by a signed offset such as `-6h` or `+1w2d3h`.
+
+`start`/`end` are the current time range's start and end; they don't snap to midnight.
 
 A bare offset (no anchor word) is relative to `now`. The sign is mandatory on the offset, so e.g. `6h` alone
 (ambiguous: before or after the anchor?) is not accepted, only `-6h` or `+6h`.
 """
 
 
-def _parse_relative(text: str, now: datetime.datetime) -> datetime.datetime | None:
-    """Resolve a relative expression like `now-6h`, `-2h30m` or `yesterday` to an absolute date-time.
+def relative_anchor(text: str) -> str | None:
+    """The anchor word of a relative expression (`now` for a bare offset), lowercase; `None` if `text` isn't one."""
+
+    text = " ".join(text.strip().split())
+    match = _RELATIVE_RE.match(text)
+    if not match or not (match.group("anchor") or match.group("offset")):
+        return None
+    return (match.group("anchor") or "now").casefold()
+
+
+def _parse_relative(
+    text: str, now: datetime.datetime, time_range: TimeRange | None = None
+) -> datetime.datetime | None:
+    """Resolve a relative expression like `now-6h`, `-2h30m`, `yesterday` or `end-6h` to an absolute date-time.
 
     Returns `None` when `text` does not look like a relative expression at all, so the caller can try the
     absolute formats next.
 
     Raises:
-        ValueError: when `text` is a syntactically valid relative expression that resolves out of range.
+        ValueError: when `text` is a syntactically valid relative expression that resolves out of range, or uses
+            `start`/`end` without a `time_range` to resolve them.
     """
 
     match = _RELATIVE_RE.match(text)
@@ -68,6 +101,10 @@ def _parse_relative(text: str, now: datetime.datetime) -> datetime.datetime | No
     anchor_word = (match.group("anchor") or "now").casefold()
     if anchor_word == "now":
         anchor = now.replace(microsecond=0)
+    elif anchor_word in _RANGE_ANCHORS:
+        if time_range is None:
+            raise ValueError(f"'{anchor_word}' can only be used in the time range fields.")
+        anchor = time_range.start if anchor_word == "start" else time_range.end
     else:
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         anchor = midnight + _WORD_OFFSETS[anchor_word]
@@ -102,12 +139,15 @@ def format_datetime(value: datetime.datetime) -> str:
     return value.strftime(DISPLAY_FORMAT)
 
 
-def parse_datetime(text: str, now: datetime.datetime | None = None) -> datetime.datetime:
+def parse_datetime(
+    text: str, now: datetime.datetime | None = None, time_range: TimeRange | None = None
+) -> datetime.datetime:
     """Parse a date-time typed by the user.
 
     Accepts `YYYY-MM-DD HH:MM:SS`, `YYYY-MM-DD HH:MM`, `YYYY-MM-DD` (also with a `T` between date and time),
     `now`, `today`, `yesterday`, `tomorrow`, and any of those with a signed offset such as `now-6h`, `-2h30m`
     or `tomorrow+1d` (units: `w`eeks, `d`ays, `h`ours, `m`inutes, `s`econds; a bare offset is relative to `now`).
+    `now` defaults to the current UTC time, so `today` etc. snap to UTC midnight. With a `time_range`, `start` and `end` (its start and end) are accepted as anchors as well, e.g. `end-6h`.
 
     Raises:
         ValueError: with a message that can be shown to the user.
@@ -115,9 +155,9 @@ def parse_datetime(text: str, now: datetime.datetime | None = None) -> datetime.
 
     # Only an ISO "T" between digits (e.g. "2025-10-01T13:45:07") is a separator; "TODAY"/"TOMORROW" must survive.
     text = " ".join(re.sub(r"(?<=\d)T(?=\d)", " ", text.strip()).split())
-    now = now or datetime.datetime.now()
+    now = now or utc_now()
 
-    relative = _parse_relative(text, now)
+    relative = _parse_relative(text, now, time_range)
     if relative is not None:
         return relative
 
@@ -132,7 +172,8 @@ def parse_datetime(text: str, now: datetime.datetime | None = None) -> datetime.
 
     raise ValueError(
         f"'{text}' is not a valid date-time; use YYYY-MM-DD [HH:MM[:SS]], 'now'/'today'/'yesterday'/'tomorrow', "
-        "or one of those with an offset such as 'now-6h' or '-2h30m'."
+        "or one of those with an offset such as 'now-6h' or '-2h30m'; in the time range fields also 'start'/'end', "
+        "e.g. 'end-6h'."
     )
 
 
@@ -197,7 +238,8 @@ class TimeRangeInput(Horizontal):
     Posts `TimeRangeInput.Changed` once per accepted change (Enter or leaving a field). Invalid input is marked in
     red, explained in a notification, and leaves the current range unchanged. The Up/Down arrow keys step the
     component under the cursor (year, month, ..., second) in the focused field's text only; Enter/blur/Escape
-    still apply it, the same as any other edit.
+    still apply it, the same as any other edit. `start`/`end` in a field refer to the range before the edit; an
+    expression anchored on the other end (e.g. `end-6h` in the start field) keeps that end fixed, even with Lock.
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -255,10 +297,10 @@ class TimeRangeInput(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Input(
-            format_datetime(self.time_range.start), id="time-range-start", select_on_focus=False, tooltip="Start"
+            format_datetime(self.time_range.start), id="time-range-start", select_on_focus=False, tooltip="Start (UTC)"
         )
         yield Label("→")
-        yield Input(format_datetime(self.time_range.end), id="time-range-end", select_on_focus=False, tooltip="End")
+        yield Input(format_datetime(self.time_range.end), id="time-range-end", select_on_focus=False, tooltip="End (UTC)")
         yield Checkbox("Lock", id="time-range-lock", tooltip="Keep the duration fixed when changing one end.")
 
     @property
@@ -279,7 +321,7 @@ class TimeRangeInput(Horizontal):
             return
 
         try:
-            value = parse_datetime(field.value)
+            value = parse_datetime(field.value, time_range=self.time_range)
         except ValueError:
             return  # don't guess at invalid or incomplete text
 
@@ -309,19 +351,25 @@ class TimeRangeInput(Horizontal):
     def apply_input(self, field: Input) -> None:
         """Validate the text of one field and, when it gives a new valid range, apply it and post `Changed`."""
 
+        current = self.time_range
         try:
-            value = parse_datetime(field.value)
+            value = parse_datetime(field.value, time_range=current)
         except ValueError as exc:
             self._reject(field, str(exc))
             return
 
-        current = self.time_range
+        # An expression on the other end (`end-6h` in the start field, `start+90m` in the end field) says exactly
+        # where this end goes relative to that one, so the other end stays put, even when the duration is locked.
+        is_start = field.id == "time-range-start"
+        other_end_anchored = relative_anchor(field.value) == ("end" if is_start else "start")
+        keep_duration = self.locked and not other_end_anchored
+
         duration = current.end - current.start
         try:
-            if field.id == "time-range-start":
-                new = TimeRange(value, value + duration if self.locked else current.end)
+            if is_start:
+                new = TimeRange(value, value + duration if keep_duration else current.end)
             else:
-                new = TimeRange(value - duration if self.locked else current.start, value)
+                new = TimeRange(value - duration if keep_duration else current.start, value)
         except OverflowError:
             self._reject(field, "Keeping the locked duration would move the other end out of range.")
             return

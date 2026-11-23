@@ -26,11 +26,19 @@ from rapidfuzz import fuzz as rf_fuzz, process
 # raises TypeError.
 import plotext
 
-from must_tui.dialogs import ErrorDialog, HelpDialog, WarningDialog, YAxisRangeDialog
+from must_tui.dialogs import ErrorDialog, HelpDialog, TimeRangeDialog, WarningDialog, YAxisRangeDialog
 from must_tui.matplotlib_bridge import MatplotlibPlotter, can_open_matplotlib_window
 from must_tui.mib import read_pcf
 from must_tui.parameter_cache import get_parameter_cache_updated_at
-from must_tui.time_range_input import TimeRange, TimeRangeInput, format_datetime, parse_datetime
+from must_tui.time_range_input import TimeRange, TimeRangeInput, format_datetime, parse_datetime, utc_timestamp
+from must_tui.time_ranges import (
+    add_recent_time_range,
+    data_range_presets,
+    default_time_range,
+    load_recent_time_ranges,
+    save_recent_time_ranges,
+    time_range_presets,
+)
 
 # from textual_plot import HiResMode, PlotWidget
 # from egse.system import title_to_kebab
@@ -377,8 +385,26 @@ class ParameterInfo(Static):
             self.table.add_row(field, str(value), key=field)
 
 
-PLOT_DATE_FORM = "Y-m-d H:M:S"
-"""plotext date format matching `format_datetime()`, for `Plot.date_form()` / `Plot.xlim()`."""
+PLOT_TIME_TICKS = 5
+"""Number of labelled ticks on the TUI plot's time axis, both ends included (plotext's own default count)."""
+
+
+def time_axis_ticks(
+    start: datetime.datetime, end: datetime.datetime, count: int = PLOT_TIME_TICKS
+) -> tuple[list[float], list[str]]:
+    """Evenly spaced tick positions (UTC POSIX timestamps) from `start` to `end`, and their labels.
+
+    The TUI plot draws its time axis with numbers (`utc_timestamp()`) and these explicit labels instead of
+    plotext's own date axis: plotext reads date strings as UTC but writes the tick labels in local time, so its
+    labels were off by the local UTC offset (e.g. +2 h in summer in Belgium).
+    """
+
+    if count < 2 or not start < end:
+        return [utc_timestamp(start)], [format_datetime(start)]
+
+    step = (end - start) / (count - 1)
+    times = [start + index * step for index in range(count)]
+    return [utc_timestamp(time) for time in times], [format_datetime(time.replace(microsecond=0)) for time in times]
 
 PLOT_COLORS = (
     "blue+", "green+", "red+", "cyan+", "magenta+", "orange+", "gray+", "blue", "green", "red", "cyan", "magenta",
@@ -430,13 +456,10 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         self.data: list[list[float]] = []
         self.time: list[list[datetime.datetime]] = []
         self.labels: list[str] = []
-        self.display_series: list[tuple[list[str], list[float]]] = []
-        """Downsampled copies of the series, with formatted timestamps, as drawn by plotext."""
+        self.display_series: list[tuple[list[float], list[float]]] = []
+        """Downsampled copies of the series, with UTC POSIX timestamps (see `time_axis_ticks()`), as drawn by plotext."""
         self.xlimits: tuple[datetime.datetime, datetime.datetime] | None = None
         self.ylimits: tuple[float, float] | None = None
-        # plotext defaults to "%d/%m/%Y" until date_form() is called; set it now so the first-ever
-        # set_xlimits() (before any replot() has run) doesn't crash on our "YYYY-MM-DD HH:MM:SS" strings.
-        self.plt.date_form(PLOT_DATE_FORM)
 
     def set_context(self, must_ctx: MustContext) -> None:
         self.must_ctx = must_ctx
@@ -458,7 +481,8 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
     def set_xlimits(self, start: datetime.datetime, end: datetime.datetime) -> None:
         self.xlimits = (start, end)
         plotter = cast(Any, self.plt)
-        plotter.xlim(start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"))
+        plotter.xlim(utc_timestamp(start), utc_timestamp(end))
+        plotter.xticks(*time_axis_ticks(start, end))
         self.refresh()
 
     def set_ylimits(self, ymin: float, ymax: float) -> None:
@@ -486,7 +510,7 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         self.title = colored_plot_title(self.labels)
 
         display_time, display_values = downsample_min_max(timestamps, values)
-        self.display_series.append(([x.strftime("%Y-%m-%d %H:%M:%S") for x in display_time], display_values))
+        self.display_series.append(([utc_timestamp(x) for x in display_time], display_values))
 
         log.info(f"Updating plot for {par_name} with {len(values)} data points, {max(values)=}.")
 
@@ -497,11 +521,15 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         # self.plt.clear_data()
         plotter = cast(Any, self.plt)
         plotter.clear_figure()  # not sure yet what the difference is with clf() or cld()
-        plotter.date_form(PLOT_DATE_FORM)  # clear_figure() also resets the date form
+        # The time axis is numeric (UTC POSIX timestamps) with our own labels, not a plotext date axis: see
+        # time_axis_ticks(). clear_figure() also clears the limits and ticks; keep showing the selected time range.
         if self.xlimits is not None:
-            # clear_figure() also clears the limits; keep showing the selected time range.
             start, end = self.xlimits
-            plotter.xlim(start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S"))
+            plotter.xlim(utc_timestamp(start), utc_timestamp(end))
+            plotter.xticks(*time_axis_ticks(start, end))
+        elif self.time and any(self.time):
+            times = [time for series in self.time for time in series]
+            plotter.xticks(*time_axis_ticks(min(times), max(times)))
         if self.ylimits is not None:
             # A user-locked Y range (see MUSTApp.manual_ylimits) must survive clear_figure() the same way
             # xlimits does, or it would silently revert to auto-scaling on the next plotted parameter/marker
@@ -589,9 +617,10 @@ class MainScreen(Screen[None]):
                     yield Button("Clear Plot", id="bt-plot-clear")
                     yield Button("Plot: TUI", id="bt-plot-backend")
                     yield Button(
-                        "Data Range",
-                        id="bt-time-range-data",
-                        tooltip="Set the time range to the selected parameter's first and last sample on MUST.",
+                        "Range…",
+                        id="bt-time-range",
+                        tooltip="Pick a time range: last hour/day/week…, the selected parameter's data range on MUST, "
+                        "or a recently used range.",
                     )
                     yield Button(
                         "Y Range",
@@ -624,6 +653,7 @@ class MUSTApp(App[None]):
         Binding("f4", "app.toggle_dark", "Toggle light/dark mode", show=False),
         Binding("f5", "refresh_parameter_cache", "Refresh parameter cache", show=False),
         Binding("ctrl+r", "reset_parameter_cache", "Reset parameter cache", show=False),
+        Binding("f6", "choose_time_range", "Choose time range (presets, data range, recent)", show=False),
     ]
 
     MARKERS = {
@@ -660,7 +690,10 @@ class MUSTApp(App[None]):
         self.plot_widget: TimeRangePlotter = TimeRangePlotter(self.must_ctx)
         self.matplotlib_plotter = MatplotlibPlotter()
         self.plot_backend = "textual"
-        self.time_range = TimeRange(start=datetime.datetime(2025, 12, 2), end=datetime.datetime(2025, 12, 5))
+        self.recent_time_ranges: list[TimeRange] = load_recent_time_ranges()
+        """Recently applied time ranges, most recent first, persisted in the cache directory (see `time_ranges`)."""
+        self.time_range = self.recent_time_ranges[0] if self.recent_time_ranges else default_time_range()
+        """Starts as the last range used in a previous session, or the last day up to now the first time."""
         self.manual_ylimits: tuple[float, float] | None = None
         """User-locked Y-axis range (via the Y Range dialog); None means both plot backends auto-scale."""
 
@@ -929,32 +962,56 @@ class MUSTApp(App[None]):
         """Move the x-axis to `time_range` and fetch the plotted parameters again for it."""
 
         self.time_range = time_range
+        self._remember_time_range(time_range)
         start, end = time_range.start, time_range.end
         self.plot_widget.set_xlimits(start, end)
         if self.plot_backend == "matplotlib":
             self.matplotlib_plotter.set_xlimits(start, end)
         self.reload_plotted_parameters()
 
-    @on(Button.Pressed, "#bt-time-range-data")
-    def use_parameter_data_range(self, event: Button.Pressed) -> None:
-        """Set the time range to the selected parameter's first and last sample, as reported by MUST."""
+    def _remember_time_range(self, time_range: TimeRange) -> None:
+        """Put `time_range` first in the recent ranges and save them, so it's offered again and used next startup."""
 
+        self.recent_time_ranges = add_recent_time_range(self.recent_time_ranges, time_range)
+        save_recent_time_ranges(self.recent_time_ranges)
+
+    @on(Button.Pressed, "#bt-time-range")
+    def show_time_range_dialog(self, event: Button.Pressed) -> None:
         event.stop()
+        self.choose_time_range()
+
+    def action_choose_time_range(self) -> None:
+        self.choose_time_range()
+
+    @work(exclusive=True, group="time-range-dialog")
+    async def choose_time_range(self) -> None:
+        """Offer presets (up to now, and up to the selected parameter's last sample), the parameter's data range and
+        recent ranges; apply the one picked."""
+
         try:
             metadata = self.screen.query_one(ParameterMetadata).metadata
             time_range_input = self.screen.query_one(TimeRangeInput)
         except NoMatches:
-            return
+            return  # not on the main screen (e.g. still loading, or another dialog is open)
 
+        data_range: TimeRange | str
         try:
-            new_range = parameter_data_range(metadata)
+            data_range = parameter_data_range(metadata)
+            data_presets = data_range_presets(data_range)
         except ValueError as exc:
-            self.notify(str(exc), title="Time range not changed", severity="warning")
+            data_range, data_presets = str(exc), []
+
+        result = await self.push_screen_wait(
+            TimeRangeDialog(
+                self.time_range, time_range_presets(), data_range, self.recent_time_ranges, data_presets
+            )
+        )
+        if result is None:
             return
 
-        time_range_input.set_time_range(new_range)
-        if new_range != self.time_range:
-            self._apply_time_range(new_range)
+        time_range_input.set_time_range(result)
+        if result != self.time_range:
+            self._apply_time_range(result)
 
     def _apply_ylimits(self, plotter: Any) -> None:
         """Apply the user-locked Y range to `plotter`, if one is set; otherwise leave it to auto-scale."""

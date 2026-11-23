@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -10,6 +10,10 @@ from textual.widgets import Button
 from textual.widgets import Input
 from textual.widgets import Label
 from textual.widgets import Markdown
+from textual.widgets import OptionList
+from textual.widgets.option_list import Option
+
+from must_tui.time_range_input import TimeRange, format_datetime
 
 
 class ErrorDialog(ModalScreen[bool]):
@@ -153,6 +157,85 @@ class YAxisRangeDialog(ModalScreen[YAxisRangeResult]):
     @on(Button.Pressed, "#btn-dialog-auto")
     def on_auto_pressed(self) -> None:
         self.dismiss("auto")
+
+    @on(Button.Pressed, "#btn-dialog-cancel")
+    def on_cancel_pressed(self) -> None:
+        self.dismiss(None)
+
+
+def format_time_range(time_range: TimeRange) -> str:
+    return f"{format_datetime(time_range.start)} → {format_datetime(time_range.end)}"
+
+
+class TimeRangeDialog(ModalScreen[Optional[TimeRange]]):
+    """Pick a time range from presets, the selected parameter's data range, or recently used ranges.
+
+    Selecting an entry (Enter or click) dismisses with its `TimeRange`; Escape or Cancel dismisses with `None`.
+    """
+
+    BINDINGS = [Binding("escape", "dismiss(None)", "", show=False)]
+
+    LABEL_WIDTH = 22
+    """Width of the name column in front of each range, so the ranges line up."""
+
+    def __init__(
+        self,
+        current: TimeRange,
+        presets: list[tuple[str, TimeRange]],
+        data_range: Union[TimeRange, str],
+        recent: list[TimeRange],
+        data_presets: Sequence[tuple[str, TimeRange]] = (),
+    ) -> None:
+        """
+        Args:
+            current: the time range in effect now, shown for reference.
+            presets: named ranges, e.g. from `time_ranges.time_range_presets()`.
+            data_range: the selected parameter's data range, or why it's not available (shown, not selectable).
+            recent: recently applied ranges, most recent first; `current` is left out of this list.
+            data_presets: named ranges ending at the parameter's last sample, e.g. from
+                `time_ranges.data_range_presets()`; shown after the data range, only when it is available.
+        """
+
+        super().__init__()
+        self._current = current
+        self._ranges: dict[str, TimeRange] = {}
+        self._options: list[Optional[Option]] = []
+
+        for index, (label, time_range) in enumerate(presets):
+            self._add_option(f"preset-{index}", label, time_range)
+
+        self._options.append(None)
+        if isinstance(data_range, TimeRange):
+            self._add_option("data-range", "Parameter data range", data_range)
+            for index, (label, time_range) in enumerate(data_presets):
+                self._add_option(f"data-preset-{index}", label, time_range)
+        else:
+            self._options.append(Option(f"{'Parameter data range':<{self.LABEL_WIDTH}}{data_range}", disabled=True))
+
+        recent = [time_range for time_range in recent if time_range != current]
+        if recent:
+            self._options.append(None)
+            for index, time_range in enumerate(recent):
+                self._add_option(f"recent-{index}", "Recent" if index == 0 else "", time_range)
+
+    def _add_option(self, option_id: str, label: str, time_range: TimeRange) -> None:
+        self._ranges[option_id] = time_range
+        self._options.append(Option(f"{label:<{self.LABEL_WIDTH}}{format_time_range(time_range)}", id=option_id))
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Time Range")
+            yield Label(f"Current: {format_time_range(self._current)}", id="lbl-time-range-current")
+            yield OptionList(*self._options, markup=False, id="opt-time-ranges")
+            with Horizontal():
+                yield Button("Cancel", id="btn-dialog-cancel")
+
+    @on(OptionList.OptionSelected, "#opt-time-ranges")
+    def on_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        time_range = self._ranges.get(event.option.id or "")
+        if time_range is not None:
+            self.dismiss(time_range)
 
     @on(Button.Pressed, "#btn-dialog-cancel")
     def on_cancel_pressed(self) -> None:

@@ -400,7 +400,7 @@ def test_plot_parameter_refuses_start_after_end(monkeypatch):
 
 
 def _ms(*args):
-    return int(dt.datetime(*args).timestamp() * 1000)
+    return int(dt.datetime(*args, tzinfo=dt.timezone.utc).timestamp() * 1000)  # MUST's epoch ms; must-tui is UTC
 
 
 def test_plot_parameter_fetches_with_pagination(monkeypatch):
@@ -554,7 +554,7 @@ def test_plot_parameter_shows_a_spinner_and_the_sample_count(monkeypatch):
     monkeypatch.setattr(must_app.MUSTApp, "_initialize_and_show_main_screen", fake_initialize)
 
     loading_during_fetch = []
-    sample_epoch_ms = int(dt.datetime(2025, 12, 2).timestamp() * 1000)
+    sample_epoch_ms = int(dt.datetime(2025, 12, 2, tzinfo=dt.timezone.utc).timestamp() * 1000)
 
     async def fake_get_parameter_data(*_args, **_kwargs):
         loading_during_fetch.append(app.plot_widget.loading)
