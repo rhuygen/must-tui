@@ -47,6 +47,7 @@ class MatplotlibPlotter:
         self.xlimits: tuple[datetime.datetime, datetime.datetime] | None = None
         self.ylimits: tuple[float, float] | None = None
         self.marker: str = "dot"
+        self.points_only: bool = False
         self._process: subprocess.Popen[str] | None = None
         self._stdin: Any = None
         self._batching: bool = False
@@ -124,10 +125,16 @@ class MatplotlibPlotter:
         self.xlimits = plotter.xlimits
         self.ylimits = plotter.ylimits
         self.marker = plotter.marker
+        self.points_only = plotter.points_only
         self._send_state()
 
     async def update(
-        self, par_name: str, timestamps: list[datetime.datetime], values: list[float], _time_range: Any
+        self,
+        par_name: str,
+        timestamps: list[datetime.datetime],
+        values: list[float],
+        _time_range: Any,
+        truncated: bool = False,  # accepted for the same signature as TimeRangePlotter.update(); not needed here
     ) -> None:
         self.time.append(timestamps)
         self.data.append(values)
@@ -160,6 +167,7 @@ class MatplotlibPlotter:
             "type": "update",
             "title": self.title,
             "marker": self.marker,
+            "points_only": self.points_only,
             "labels": self.labels,
             "time": [[timestamp.isoformat() for timestamp in series] for series in self.time],
             "data": self.data,

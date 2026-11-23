@@ -500,10 +500,11 @@ class _FakePlotter:
         self.labels = [name for name, _, _ in series]
         self.time = [t for _, t, _ in series]
         self.data = [v for _, _, v in series]
+        self.fetched_ranges = [(None, False) for _ in series]
         self.xlimits = self.ylimits = None
 
     def clear_plot(self):
-        self.labels, self.time, self.data = [], [], []
+        self.labels, self.time, self.data, self.fetched_ranges = [], [], [], []
 
     def set_xlimits(self, start, end):
         self.xlimits = (start, end)
@@ -511,10 +512,11 @@ class _FakePlotter:
     def set_ylimits(self, ymin, ymax):
         self.ylimits = (ymin, ymax)
 
-    async def update(self, name, timestamps, values, _time_range):
+    async def update(self, name, timestamps, values, time_range, truncated=False):
         self.labels.append(name)
         self.time.append(timestamps)
         self.data.append(values)
+        self.fetched_ranges.append((time_range, truncated))
 
 
 def _app_for_reload(monkeypatch, plotted, server_data, during_fetch=None, truncated_names=frozenset()):
@@ -587,7 +589,8 @@ def test_reload_respects_clear_and_selection_during_the_fetch(monkeypatch):
 
     def clear_then_select_c(app):
         app.plot_widget.clear_plot()
-        app.plot_widget.labels, app.plot_widget.time, app.plot_widget.data = ["C"], [new], [[9.0]]
+        plot = app.plot_widget
+        plot.labels, plot.time, plot.data, plot.fetched_ranges = ["C"], [new], [[9.0]], [(None, False)]
 
     app, _ = _app_for_reload(monkeypatch, [("A", old, [1.0])], server_data, during_fetch=clear_then_select_c)
 

@@ -39,3 +39,11 @@ currently loaded, and how long ago the parameter cache was last refreshed.
 ## Keyboard Shortcuts
 
 <!-- KEYBINDINGS -->
+
+### In the plot
+
+Click the plot (or Tab to it) first. The mouse wheel over the plot zooms too, in smaller steps.
+Every pan/zoom shows at once; about 0.3 s after the last one, the plotted parameters are fetched
+for the new range, unless their data for it was already loaded (e.g. when zooming in).
+
+<!-- PLOT_KEYBINDINGS -->

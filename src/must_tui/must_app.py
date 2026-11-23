@@ -1,4 +1,5 @@
 import asyncio
+import bisect
 import datetime
 import importlib.resources
 import re
@@ -36,8 +37,10 @@ from must_tui.time_ranges import (
     data_range_presets,
     default_time_range,
     load_recent_time_ranges,
+    pan_time_range,
     save_recent_time_ranges,
     time_range_presets,
+    zoom_time_range,
 )
 
 # from textual_plot import HiResMode, PlotWidget
@@ -108,16 +111,27 @@ Keeping the table generated (rather than hand-written in help.md) means it can't
 bindings: there is exactly one place (MUSTApp.BINDINGS) that defines what a key does.
 """
 
+HELP_PLOT_KEYBINDINGS_PLACEHOLDER = "<!-- PLOT_KEYBINDINGS -->"
+"""Marker in the bundled help.md replaced with a table generated from TimeRangePlotter.BINDINGS (focused plot)."""
+
+_KEY_NAMES = {"plus": "+", "minus": "-", "equals_sign": "=", "left": "←", "right": "→", "up": "↑", "down": "↓"}
+"""Display names for Textual key ids that aren't readable as-is."""
+
 
 def format_binding_key(key: str) -> str:
-    """Render a Binding key id like 'ctrl+q' or 'f1' as 'Ctrl+Q' / 'F1' for display."""
+    """Render a Binding key id like 'ctrl+q', 'f1' or 'plus,equals_sign' as 'Ctrl+Q' / 'F1' / '+ / =' for display."""
 
     def format_part(part: str) -> str:
+        if part in _KEY_NAMES:
+            return _KEY_NAMES[part]
         if part[:1].lower() == "f" and part[1:].isdigit():
             return part.upper()
         return part.capitalize()
 
-    return "+".join(format_part(part) for part in key.split("+"))
+    def format_one(single: str) -> str:
+        return "+".join(format_part(part) for part in single.strip().split("+"))
+
+    return " / ".join(format_one(single) for single in key.split(","))
 
 
 def keybindings_markdown_table(bindings: list[Binding]) -> str:
@@ -134,7 +148,8 @@ def load_help_markdown() -> str:
     help_path = importlib.resources.files("must_tui").joinpath("data/help.md")
     content = help_path.read_text()
     table = keybindings_markdown_table(MUSTApp.BINDINGS)
-    return content.replace(HELP_KEYBINDINGS_PLACEHOLDER, table)
+    plot_table = keybindings_markdown_table(TimeRangePlotter.BINDINGS)
+    return content.replace(HELP_KEYBINDINGS_PLACEHOLDER, table).replace(HELP_PLOT_KEYBINDINGS_PLACEHOLDER, plot_table)
 
 
 SEARCH_DEBOUNCE = 0.15
@@ -385,6 +400,12 @@ class ParameterInfo(Static):
             self.table.add_row(field, str(value), key=field)
 
 
+WHEEL_ZOOM_FACTOR = 1.25
+"""Zoom factor per mouse wheel event; smaller than the keys' 2x, since a terminal often sends several per notch."""
+
+NAVIGATION_DEBOUNCE = 0.3
+"""Seconds after the last pan/zoom before the new time range is committed: remembered, redrawn and fetched."""
+
 PLOT_TIME_TICKS = 5
 """Number of labelled ticks on the TUI plot's time axis, both ends included (plotext's own default count)."""
 
@@ -444,10 +465,45 @@ def colored_plot_title(labels: list[str]) -> str:
 
 
 class TimeRangePlotter(PlotWidget, can_focus=True):
-    """Widget to plot parameter data over a specified time range."""
+    """Widget to plot parameter data over a specified time range.
+
+    When focused, the keys below (and the mouse wheel, anywhere over the plot) pan and zoom the time range: they post
+    a `Navigate` message, which the app turns into a new time range.
+    """
+
+    BINDINGS = [
+        Binding("left", "navigate('pan', -0.5)", "Pan left"),
+        Binding("right", "navigate('pan', 0.5)", "Pan right"),
+        Binding("plus,equals_sign", "navigate('zoom', 0.5)", "Zoom in"),
+        Binding("minus", "navigate('zoom', 2)", "Zoom out"),
+        Binding("0", "navigate('reset', 0)", "Parameter data range"),
+        # Smaller steps, by 1/3 (Ctrl) and 1/4 (Shift) of the duration; zooming out is the inverse of zooming in,
+        # so in/out cancel. Zoom uses the arrows: Ghostty takes Ctrl with +/-/0 for its font size, and Shift with
+        # +/- can't be told apart from plain + and _ on most layouts. Not in the footer, to keep it short.
+        Binding("ctrl+left", "navigate('pan', -1, 3)", "Pan left by 1/3", show=False),
+        Binding("ctrl+right", "navigate('pan', 1, 3)", "Pan right by 1/3", show=False),
+        Binding("shift+left", "navigate('pan', -1, 4)", "Pan left by 1/4", show=False),
+        Binding("shift+right", "navigate('pan', 1, 4)", "Pan right by 1/4", show=False),
+        Binding("ctrl+up", "navigate('zoom', 2, 3)", "Zoom in by 1/3", show=False),
+        Binding("ctrl+down", "navigate('zoom', 3, 2)", "Zoom out by 1/3", show=False),
+        Binding("shift+up", "navigate('zoom', 3, 4)", "Zoom in by 1/4", show=False),
+        Binding("shift+down", "navigate('zoom', 4, 3)", "Zoom out by 1/4", show=False),
+    ]
+
+    class Navigate(Message):
+        """Asks for the time range to be panned (`amount`: fraction of the duration), zoomed (`amount`: factor for
+        the duration) or reset to the selected parameter's data range (`action` "reset")."""
+
+        def __init__(self, action: str, amount: float) -> None:
+            super().__init__()
+            self.action = action
+            self.amount = amount
 
     marker: var[str] = var("dot")
     """The type of marker to use for the plot."""
+
+    points_only: var[bool] = var(False)
+    """Draw the samples only (scatter), without lines connecting consecutive samples."""
 
     def __init__(self, must_ctx: MustContext) -> None:
         super().__init__()
@@ -456,8 +512,11 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         self.data: list[list[float]] = []
         self.time: list[list[datetime.datetime]] = []
         self.labels: list[str] = []
+        self.fetched_ranges: list[tuple[TimeRange | None, bool]] = []
+        """Per series: the time range its data was fetched for (None: unknown), and whether that fetch was truncated."""
         self.display_series: list[tuple[list[float], list[float]]] = []
-        """Downsampled copies of the series, with UTC POSIX timestamps (see `time_axis_ticks()`), as drawn by plotext."""
+        """Per series, the part within `xlimits` (all of it without limits), downsampled, with UTC POSIX timestamps
+        (see `time_axis_ticks()`), as drawn by plotext. Rebuilt for new limits by `refresh_detail()`."""
         self.xlimits: tuple[datetime.datetime, datetime.datetime] | None = None
         self.ylimits: tuple[float, float] | None = None
 
@@ -473,6 +532,7 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         self.data = []
         self.time = []
         self.labels = []
+        self.fetched_ranges = []
         self.display_series = []
         self.title = colored_plot_title(self.labels)
         self.plt.clear_data()
@@ -500,17 +560,26 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         self.refresh()
 
     async def update(
-        self, par_name: str, timestamps: list[datetime.datetime], values: list[float], time_range: TimeRange
+        self,
+        par_name: str,
+        timestamps: list[datetime.datetime],
+        values: list[float],
+        time_range: TimeRange | None,
+        truncated: bool = False,
     ) -> None:
-        """Update the plot when the input data changes."""
+        """Add a series. `time_range` is the range it was fetched for, `truncated` whether that fetch was cut short."""
+
+        # Sorted by time, for the bisect in _display_part(). Not documented by MUST link, so don't rely on it.
+        if any(later < earlier for earlier, later in zip(timestamps, timestamps[1:])):
+            pairs = sorted(zip(timestamps, values), key=lambda pair: pair[0])
+            timestamps, values = [time for time, _ in pairs], [value for _, value in pairs]
 
         self.time.append(timestamps)
         self.data.append(values)
         self.labels.append(par_name)
+        self.fetched_ranges.append((time_range, truncated))
         self.title = colored_plot_title(self.labels)
-
-        display_time, display_values = downsample_min_max(timestamps, values)
-        self.display_series.append(([utc_timestamp(x) for x in display_time], display_values))
+        self.display_series.append(self._display_part(timestamps, values))
 
         log.info(f"Updating plot for {par_name} with {len(values)} data points, {max(values)=}.")
 
@@ -542,23 +611,75 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         # Not passing label= here: plotext's legend crashes (IndexError) when a labelled series has no point
         # within the current xlim, e.g. briefly while reloading after a time range change. The title is
         # colored to match each series instead (colored_plot_title()); color= here must stay in sync with it.
+        draw = plotter.scatter if self.points_only else plotter.plot
         for index, (time, data) in enumerate(self.display_series):
-            plotter.plot(time, data, marker=self.marker, color=series_color(index))
+            if time:  # nothing of this series within the limits; the colors stay tied to the series' index
+                draw(time, data, marker=self.marker, color=series_color(index))
         self.refresh()
+
+    def _display_part(
+        self, timestamps: list[datetime.datetime], values: list[float]
+    ) -> tuple[list[float], list[float]]:
+        """The part of a (time-sorted) series within `xlimits`, downsampled, as drawn by plotext.
+
+        Plus the nearest sample on either side outside the limits, if any: plotext's line plot connects consecutive
+        samples, so without them the line from the last sample before the limits to the first one inside (or out
+        through the end) would be missing -- conspicuous across a gap in the data, after zooming in.
+        """
+
+        before: list[int] = []
+        after: list[int] = []
+        if self.xlimits is not None:
+            lo = bisect.bisect_left(timestamps, self.xlimits[0])
+            hi = bisect.bisect_right(timestamps, self.xlimits[1])
+            before = [lo - 1] if lo > 0 else []
+            after = [hi] if hi < len(timestamps) else []
+            inside_time, inside_values = downsample_min_max(timestamps[lo:hi], values[lo:hi])
+        else:
+            inside_time, inside_values = downsample_min_max(timestamps, values)
+
+        display_time = [timestamps[i] for i in before] + list(inside_time) + [timestamps[i] for i in after]
+        display_values = [values[i] for i in before] + list(inside_values) + [values[i] for i in after]
+        return [utc_timestamp(time) for time in display_time], display_values
+
+    def refresh_detail(self) -> None:
+        """Redraw every series for the current `xlimits` from its full-resolution data.
+
+        After zooming in without fetching again, this shows the detail the earlier, wider downsampling left out.
+        """
+
+        self.display_series = [self._display_part(time, data) for time, data in zip(self.time, self.data)]
+        self.replot()
+
+    def covers(self, time_range: TimeRange) -> bool:
+        """Whether every plotted series already has all its data for `time_range`, so it needn't be fetched again."""
+
+        return all(
+            fetched is not None and not truncated and fetched.start <= time_range.start and time_range.end <= fetched.end
+            for fetched, truncated in self.fetched_ranges
+        )
+
+    def action_navigate(self, action: str, amount: float, divisor: int = 1) -> None:
+        """Post `Navigate(action, amount / divisor)`; the divisor because binding arguments must be literals."""
+
+        self.post_message(self.Navigate(action, amount / divisor))
 
     async def _watch_marker(self) -> None:
         """React to the marker being changed."""
         self.replot()
 
+    def _watch_points_only(self) -> None:
+        self.replot()
+
     @on(MouseScrollDown)
     def zoom_out(self, event: MouseScrollDown) -> None:
         event.stop()
-        log.debug(f"MouseScrollDown: {event=}")
+        self.post_message(self.Navigate("zoom", WHEEL_ZOOM_FACTOR))
 
     @on(MouseScrollUp)
     def zoom_in(self, event: MouseScrollUp) -> None:
         event.stop()
-        log.debug(f"MouseScrollUp: {event=}")
+        self.post_message(self.Navigate("zoom", 1 / WHEEL_ZOOM_FACTOR))
 
     @on(MouseDown)
     def start_drag(self, event: MouseDown) -> None:
@@ -654,6 +775,7 @@ class MUSTApp(App[None]):
         Binding("f5", "refresh_parameter_cache", "Refresh parameter cache", show=False),
         Binding("ctrl+r", "reset_parameter_cache", "Reset parameter cache", show=False),
         Binding("f6", "choose_time_range", "Choose time range (presets, data range, recent)", show=False),
+        Binding("f7", "toggle_points_only", "Toggle lines / points only", show=False),
     ]
 
     MARKERS = {
@@ -665,6 +787,9 @@ class MUSTApp(App[None]):
 
     marker: var[str] = var("dot")
     """The marker used for each of the plots."""
+
+    points_only: var[bool] = var(False)
+    """Plot the samples only (scatter), without connecting lines, in both plot backends (F7)."""
 
     plot_maximized: var[bool] = var(False)
     """Whether the plot area (plot + its controls) is maximized, hiding the rest of the main screen."""
@@ -690,6 +815,8 @@ class MUSTApp(App[None]):
         self.plot_widget: TimeRangePlotter = TimeRangePlotter(self.must_ctx)
         self.matplotlib_plotter = MatplotlibPlotter()
         self.plot_backend = "textual"
+        self._latest_recent_from_navigation = False
+        """Whether the first of `recent_time_ranges` was added by pan/zoom (see `_remember_time_range()`)."""
         self.recent_time_ranges: list[TimeRange] = load_recent_time_ranges()
         """Recently applied time ranges, most recent first, persisted in the cache directory (see `time_ranges`)."""
         self.time_range = self.recent_time_ranges[0] if self.recent_time_ranges else default_time_range()
@@ -971,11 +1098,71 @@ class MUSTApp(App[None]):
             self.matplotlib_plotter.set_xlimits(start, end)
         self.reload_plotted_parameters()
 
-    def _remember_time_range(self, time_range: TimeRange) -> None:
-        """Put `time_range` first in the recent ranges and save them, so it's offered again and used next startup."""
+    def _remember_time_range(self, time_range: TimeRange, from_navigation: bool = False) -> None:
+        """Put `time_range` first in the recent ranges and save them, so it's offered again and used next startup.
 
-        self.recent_time_ranges = add_recent_time_range(self.recent_time_ranges, time_range)
+        Pan/zoom (`from_navigation`) replaces the previous range when that came from pan/zoom too, so exploring
+        the plot leaves one recent range (the last view), not one per step.
+        """
+
+        recent = self.recent_time_ranges
+        if from_navigation and self._latest_recent_from_navigation and recent:
+            recent = recent[1:]
+        self.recent_time_ranges = add_recent_time_range(recent, time_range)
+        self._latest_recent_from_navigation = from_navigation
         save_recent_time_ranges(self.recent_time_ranges)
+
+    @on(TimeRangePlotter.Navigate)
+    def navigate_time_range(self, event: TimeRangePlotter.Navigate) -> None:
+        """Pan/zoom: show the new range at once (fields + TUI x-axis); `commit_navigation()` does the rest."""
+
+        event.stop()
+        if event.action == "reset":
+            try:
+                new_range: TimeRange | None = parameter_data_range(self.screen.query_one(ParameterMetadata).metadata)
+            except NoMatches:
+                return
+            except ValueError as exc:
+                self.notify(str(exc), title="Time range not changed", severity="warning")
+                return
+        elif event.action == "pan":
+            new_range = pan_time_range(self.time_range, event.amount)
+        else:
+            new_range = zoom_time_range(self.time_range, event.amount)
+
+        if new_range is None or new_range == self.time_range:
+            self.bell()
+            return
+
+        self.time_range = new_range
+        try:
+            self.screen.query_one(TimeRangeInput).set_time_range(new_range)
+        except NoMatches:
+            pass
+        self.plot_widget.set_xlimits(new_range.start, new_range.end)
+        self.commit_navigation()
+
+    @work(exclusive=True, group="navigate")
+    async def commit_navigation(self) -> None:
+        """Once pan/zoom pauses: remember the range, update Matplotlib, and fetch only when the data isn't there yet.
+
+        Exclusive with a debounce, so a burst of key presses or wheel events commits (and fetches) once.
+        """
+
+        await asyncio.sleep(NAVIGATION_DEBOUNCE)
+        time_range = self.time_range
+        self._remember_time_range(time_range, from_navigation=True)
+        if self.plot_backend == "matplotlib":
+            self.matplotlib_plotter.set_xlimits(time_range.start, time_range.end)
+
+        if self.plot_widget.covers(time_range):
+            # Everything plotted was fetched completely for a range containing this one. A reload still running
+            # for an earlier range would only replace the data and is no longer needed.
+            self.workers.cancel_group(self, "reload")
+            self.plot_widget.loading = False
+            self.plot_widget.refresh_detail()
+        else:
+            self.reload_plotted_parameters(cover_plot=False)
 
     @on(Button.Pressed, "#bt-time-range")
     def show_time_range_dialog(self, event: Button.Pressed) -> None:
@@ -1055,20 +1242,24 @@ class MUSTApp(App[None]):
                 self.matplotlib_plotter.set_ylimits(*result)
 
     @work(exclusive=True, group="reload", exit_on_error=False)
-    async def reload_plotted_parameters(self) -> None:
+    async def reload_plotted_parameters(self, cover_plot: bool = True) -> None:
         """Fetch the plotted parameters again for the current time range and replace their series.
 
-        Being exclusive, a further range change cancels a reload that is still running.
+        Being exclusive, a further range change cancels a reload that is still running. `cover_plot` shows the
+        loading spinner over the plot meanwhile. Pan/zoom passes False: Textual treats a loading widget as disabled
+        (no key bindings, no mouse events), which would stop further panning/zooming until the fetch is done.
         """
 
-        self.plot_widget.loading = True
+        if cover_plot:
+            self.plot_widget.loading = True
         try:
             await self._reload_plotted_parameters()
         except Exception as exc:
             log.error(f"Reloading the plotted parameters failed: {exc!r}")
             self.notify(f"Reloading the plotted parameters failed: {exc}", severity="error")
         finally:
-            self.plot_widget.loading = False
+            if cover_plot:  # not someone else's spinner, e.g. plot_parameter()'s
+                self.plot_widget.loading = False
 
     async def _reload_plotted_parameters(self) -> None:
         names = list(dict.fromkeys(self.plot_widget.labels))  # unique, in plot order
@@ -1079,13 +1270,13 @@ class MUSTApp(App[None]):
         period = f"{format_datetime(time_range.start)} – {format_datetime(time_range.end)}"
         self.notify(f"Reloading {len(names)} plotted parameter(s) for {period}…", title="Time range changed")
 
-        reloaded: dict[str, tuple[list[datetime.datetime], list[float]]] = {}
+        reloaded: dict[str, tuple[list[datetime.datetime], list[float], TimeRange, bool]] = {}
         without_data: list[str] = []
         truncated_names: list[str] = []
         for name in names:
             timestamps, values, was_truncated = await self._fetch_parameter_data(name, time_range)
             if timestamps and values:
-                reloaded[name] = (timestamps, values)
+                reloaded[name] = (timestamps, values, time_range, was_truncated)
                 if was_truncated:
                     truncated_names.append(name)
             else:
@@ -1093,17 +1284,21 @@ class MUSTApp(App[None]):
 
         # Selecting a parameter or clearing the plot may have happened while fetching. Keep what was added
         # meanwhile (it was fetched for the new range already) and drop what was cleared.
-        current = list(zip(self.plot_widget.labels, self.plot_widget.time, self.plot_widget.data))
-        current_names = {label for label, _, _ in current}
+        plot = self.plot_widget
+        current = [
+            (label, t, v, *fetched) for label, t, v, fetched in zip(plot.labels, plot.time, plot.data, plot.fetched_ranges)
+        ]
+        current_names = {label for label, *_ in current}
         series = [(name, *reloaded[name]) for name in names if name in reloaded and name in current_names]
-        series += [(label, t, v) for label, t, v in current if label not in names]
+        series += [entry for entry in current if entry[0] not in names]
 
         self.plot_widget.clear_plot()
         if series:
-            self.plot_widget.set_xlimits(time_range.start, time_range.end)
+            # The range shown now, not necessarily the one fetched for: it may have been panned/zoomed meanwhile.
+            self.plot_widget.set_xlimits(self.time_range.start, self.time_range.end)
             self._apply_ylimits(self.plot_widget)
-            for name, timestamps, values in series:
-                await self.plot_widget.update(name, timestamps, values, time_range)
+            for name, timestamps, values, fetched_range, was_truncated in series:
+                await self.plot_widget.update(name, timestamps, values, fetched_range, truncated=was_truncated)
         if self.plot_backend == "matplotlib":
             self.matplotlib_plotter.sync_from_plotter(self.plot_widget)
 
@@ -1190,6 +1385,8 @@ class MUSTApp(App[None]):
             return
 
         data_provider = self.DATA_PROVIDER
+        # The range fetched for; self.time_range may be panned/zoomed while fetching (see commit_navigation()).
+        fetched_range = self.time_range
         received_response = False
         timestamps: list[datetime.datetime] = []
         values: list[float] = []
@@ -1203,8 +1400,8 @@ class MUSTApp(App[None]):
             self.must_ctx,
             data_provider,
             par_name,
-            format_datetime(self.time_range.start),
-            format_datetime(self.time_range.end),
+            format_datetime(fetched_range.start),
+            format_datetime(fetched_range.end),
             paginated=True,
             truncated=truncated,
         ):
@@ -1223,7 +1420,7 @@ class MUSTApp(App[None]):
             return
 
         log.info(
-            f"Fetched data for parameter {par_name} from {self.time_range.start} to {self.time_range.end}, "
+            f"Fetched data for parameter {par_name} from {fetched_range.start} to {fetched_range.end}, "
             f"data length: {len(timestamps)}"
         )
 
@@ -1242,7 +1439,7 @@ class MUSTApp(App[None]):
 
         self.plot_widget.set_xlimits(self.time_range.start, self.time_range.end)
         self._apply_ylimits(self.plot_widget)
-        await self.plot_widget.update(par_name, timestamps, values, self.time_range)
+        await self.plot_widget.update(par_name, timestamps, values, fetched_range, truncated=bool(truncated))
 
         if self.plot_backend == "matplotlib":
             with self.matplotlib_plotter.batch():
@@ -1447,9 +1644,23 @@ class MUSTApp(App[None]):
             self._jump_window_start = start
         option_list.highlighted = idx - start
 
+    def _update_sub_title(self) -> None:
+        self.sub_title = self.MARKERS[self.marker] + (" · points only" if self.points_only else "")
+
+    def watch_points_only(self) -> None:
+        self._update_sub_title()
+        self.plot_widget.points_only = self.points_only
+        self.matplotlib_plotter.points_only = self.points_only
+        if self.plot_backend == "matplotlib" and self._main_screen_active():
+            self.matplotlib_plotter.replot()
+
+    def action_toggle_points_only(self) -> None:
+        """Switch between lines connecting the samples and the samples only."""
+        self.points_only = not self.points_only
+
     def watch_marker(self) -> None:
         """React to the marker type being changed."""
-        self.sub_title = self.MARKERS[self.marker]
+        self._update_sub_title()
         # The marker reactive watcher can run before the main screen is active.
         # Update the persistent widget instance directly instead of querying the DOM.
         self.plot_widget.marker = self.marker

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Pan and zoom the time range from the plot: with the plot focused (click it), `←`/`→` move the range by half its
+  duration, `+`/`-` zoom in/out by a factor 2, `0` goes to the selected parameter's data range, and the mouse wheel
+  zooms in smaller steps. The plot follows at once; the data is fetched once the keys pause, and not at all when it
+  was already loaded (zooming in now shows the samples at full detail instead of the earlier downsampled view).
+- With the plot focused, `Ctrl`/`Shift` take smaller steps: `Ctrl+←/→` pan by a third and `Shift+←/→` by a quarter
+  of the range; `Ctrl+↑/↓` zoom in/out by a third and `Shift+↑/↓` by a quarter.
+- `F7` switches the plot between lines connecting the samples and the samples only (points, no lines), in both the
+  TUI and the Matplotlib plot. The header shows "points only" while it's on.
+
 ### Fixed
 
 - Fixed: after a failed login, answering the Abort/Ignore dialog with Ignore logged an error ("Task exception was

@@ -79,6 +79,45 @@ def data_range_presets(data_range: TimeRange) -> list[tuple[str, TimeRange]]:
     return [(f"Last {name} of data", TimeRange(end - duration, end)) for name, duration in PRESET_DURATIONS]
 
 
+def _within_supported_years(time_range: TimeRange) -> bool:
+    return 1000 <= time_range.start.year and time_range.end.year <= 9999
+
+
+def pan_time_range(time_range: TimeRange, fraction: float) -> TimeRange | None:
+    """Move `time_range` by `fraction` of its duration (negative: earlier), in whole seconds, at least one second.
+
+    Returns `None` when the result would fall outside the years 1000-9999.
+    """
+
+    duration = time_range.end - time_range.start
+    seconds = round(duration.total_seconds() * fraction) or (1 if fraction > 0 else -1)
+    shift = datetime.timedelta(seconds=seconds)
+    try:
+        moved = TimeRange(time_range.start + shift, time_range.end + shift)
+    except OverflowError:
+        return None
+    return moved if _within_supported_years(moved) else None
+
+
+def zoom_time_range(time_range: TimeRange, factor: float) -> TimeRange | None:
+    """Scale the duration of `time_range` by `factor` around its centre (below 1: zoom in), in whole seconds.
+
+    The result lasts at least one second. Returns `None` when nothing would change (already one second long) or
+    the result would fall outside the years 1000-9999.
+    """
+
+    duration = time_range.end - time_range.start
+    new_duration = datetime.timedelta(seconds=max(1, round(duration.total_seconds() * factor)))
+    try:
+        start = (time_range.start + (duration - new_duration) / 2).replace(microsecond=0)
+        zoomed = TimeRange(start, start + new_duration)
+    except OverflowError:
+        return None
+    if zoomed == time_range or not _within_supported_years(zoomed):
+        return None
+    return zoomed
+
+
 def add_recent_time_range(recent: list[TimeRange], time_range: TimeRange) -> list[TimeRange]:
     """Return `recent` with `time_range` moved (or added) to the front, without duplicates, capped in length."""
 

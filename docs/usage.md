@@ -237,6 +237,48 @@ Definition, Dot) with `F3`.
 
 ---
 
+## Pan and Zoom in the Plot
+
+Click the plot (or **Tab** to it) to give it focus; its keys then show in the footer:
+
+| Key | Action |
+|---|---|
+| `←` / `→` | Move the time range back / forward by half its duration |
+| `+` (or `=`) | Zoom in: half the duration, around the centre |
+| `-` | Zoom out: double the duration, around the centre |
+| `0` | Set the time range to the selected parameter's data range (its first to last sample) |
+| `Ctrl+←` / `Ctrl+→` | Move the time range back / forward by a third of its duration |
+| `Shift+←` / `Shift+→` | Move the time range back / forward by a quarter of its duration |
+| `Ctrl+↑` / `Ctrl+↓` | Zoom in / out by a third: to 2/3 / 3/2 of the duration |
+| `Shift+↑` / `Shift+↓` | Zoom in / out by a quarter: to 3/4 / 4/3 of the duration |
+
+The smaller zoom steps use the arrow keys rather than `+`/`-`: terminals such as Ghostty use
+`Ctrl` with `+`/`-` for their own font size, and `Shift` with `+`/`-` can't be told apart from a
+plain `+` or `_` on most keyboard layouts. Zooming out by a step undoes zooming in by the same step.
+The modifier keys are listed in the help (`F1`) but not in the footer, to keep it short.
+
+The mouse wheel over the plot zooms too, in smaller steps (×1.25 per wheel event). Pan and zoom work in
+whole seconds, down to a one-second range.
+
+Each step moves the plot's time axis and the **Start → End** fields at once. About 0.3 s after the
+last step, the new range is applied: the plotted parameters are fetched again for it, unless all of
+their data for it was already loaded — zooming in, or panning/zooming back within the range fetched
+before, then needs no fetch and just redraws the samples at full detail. Data that was cut short by
+the sample limit is always fetched again. While pan/zoom fetches, the plot is not covered by the
+loading spinner, so you can keep panning and zooming; a newer step cancels a fetch that is no longer
+needed.
+
+The plot draws a line between consecutive samples, also across a gap in the data, where it can look
+like a slope that isn't in the data. Press `F7` to show the samples only. When zooming in without a
+fetch, the nearest sample just outside the new range is kept, so a line crossing the edge is still
+drawn. After a fetch, MUST returns only the samples inside the range, so such a line then starts at
+the first sample inside it.
+
+A pan/zoom session is remembered as one recent range (see **Range…**): the view you ended up with,
+not every step on the way.
+
+---
+
 ## Global Key Bindings
 
 These bindings are available anywhere in the application. Every one of them is a `Ctrl`-combo or a
@@ -256,6 +298,7 @@ regardless of where focus is:
 | `F5` | Soft-refresh the parameter cache (fetches from server, keeps SQLite cache) |
 | `Ctrl+R` | Hard-reset the parameter cache (wipes SQLite cache, then re-fetches) |
 | `F6` | Choose a time range: presets, the selected parameter's data range, or a recently used range |
+| `F7` | Toggle between lines connecting the samples and the samples only (points), in both plot backends |
 
 Only the first four (`F1`, `Ctrl+Q`, `Ctrl+L`, `Ctrl+Z`) are shown in the footer, to keep it short;
 the rest still work exactly the same, they're just not advertised there. The full table — generated

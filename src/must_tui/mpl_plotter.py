@@ -23,6 +23,7 @@ class PlotState:
     def __init__(self) -> None:
         self.title = "Parameter Data Plot"
         self.marker = "dot"
+        self.points_only = False
         self.labels: list[str] = []
         self.time: list[list[datetime.datetime]] = []
         self.data: list[list[float]] = []
@@ -32,6 +33,7 @@ class PlotState:
     def update(self, payload: dict[str, Any]) -> None:
         self.title = payload.get("title", self.title)
         self.marker = payload.get("marker", self.marker)
+        self.points_only = payload.get("points_only", self.points_only)
         self.labels = payload.get("labels", self.labels)
         self.time = [
             [datetime.datetime.fromisoformat(timestamp) for timestamp in series]
@@ -66,7 +68,8 @@ def main() -> int:
 
         marker = MARKERS.get(state.marker, ".")
         for timestamps, values, label in zip(state.time, state.data, state.labels):
-            axes.plot(mdates.date2num(timestamps), values, marker=marker, linestyle="-", label=label)
+            linestyle = "None" if state.points_only else "-"
+            axes.plot(mdates.date2num(timestamps), values, marker=marker, linestyle=linestyle, label=label)
 
         if state.xlimits is not None:
             axes.set_xlim(float(mdates.date2num(state.xlimits[0])), float(mdates.date2num(state.xlimits[1])))
