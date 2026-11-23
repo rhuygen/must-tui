@@ -700,7 +700,9 @@ class MUSTApp(App[None]):
     async def on_mount(self) -> None:
         self.install_screen(LoadingScreen(), name="loading")
         self.push_screen("loading")
-        asyncio.create_task(self._initialize_and_show_main_screen())
+        # A worker, not a bare asyncio task: on a failed login, startup waits for the Abort/Ignore dialog with
+        # push_screen_wait(), which raises NoActiveWorker outside a worker (the dialog then never appeared).
+        self.run_worker(self._initialize_and_show_main_screen(), name="startup", group="startup")
         self.set_interval(0.5, self._check_matplotlib_window)
 
     def _set_loading_status(self, message: str) -> None:

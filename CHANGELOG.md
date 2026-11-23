@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed: after a failed login, answering the Abort/Ignore dialog with Ignore logged an error ("Task exception was
+  never retrieved", `NoActiveWorker`) and skipped the rest of startup. Startup now completes normally.
 - Fixed: the plot's time axis and the plotted samples were shifted by the computer's UTC offset (e.g. two hours
   in Belgian summer time). The TUI plot labelled a 12:00–13:00 range as 14:00–15:00, and the samples were drawn
   outside the selected range, so a short range could look empty.
