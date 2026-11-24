@@ -42,6 +42,7 @@ def failed_login(monkeypatch):
 async def _start_until_error_dialog(app, pilot):
     for _ in range(200):  # the real startup also reads the bundled pcf.dat, give it up to 10 s
         if isinstance(app.screen, ErrorDialog):
+            await pilot.pause()  # laid out, so its buttons can be clicked
             return app.screen
         await pilot.pause(0.05)
     raise AssertionError(f"no ErrorDialog after a failed login; screen is {app.screen!r}")

@@ -13,8 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duration, `+`/`-` zoom in/out by a factor 2, `0` goes to the selected parameter's data range, and the mouse wheel
   zooms in smaller steps. The plot follows at once; the data is fetched once the keys pause, and not at all when it
   was already loaded (zooming in now shows the samples at full detail instead of the earlier downsampled view).
-- With the plot focused, `Ctrl`/`Shift` take smaller steps: `Ctrl+←/→` pan by a third and `Shift+←/→` by a quarter
-  of the range; `Ctrl+↑/↓` zoom in/out by a third and `Shift+↑/↓` by a quarter.
+- `F8` mutes informational notifications (e.g. "Reloading…"/"Reloaded…"), for a live demo; warnings and errors
+  still show. Muting also clears the notifications on screen; the header shows "notifications muted" while it's on.
+- With the plot focused, `Ctrl` takes smaller steps: `Ctrl+←/→` pan by a quarter of the range, `Ctrl+↑/↓` zoom
+  in/out by a quarter.
+- A reload after a time range change (also pan/zoom) shows one notification with its result; "Reloading…" is only
+  shown first when the fetch takes longer than a second.
+- The plot has a border that lights up while it has focus (its pan/zoom keys work then), like the parameter list.
 - `F7` switches the plot between lines connecting the samples and the samples only (points, no lines), in both the
   TUI and the Matplotlib plot. The header shows "points only" while it's on.
 

@@ -411,7 +411,7 @@ def test_matplotlib_gets_points_only_in_its_state():
     assert sent[-1]["points_only"] is True
 
 
-def test_ctrl_and_shift_take_smaller_steps(nav_app):
+def test_ctrl_takes_quarter_steps(nav_app):
     app, _, _ = nav_app
     hour = dt.timedelta(hours=1)
 
@@ -419,19 +419,62 @@ def test_ctrl_and_shift_take_smaller_steps(nav_app):
         async with app.run_test(size=(160, 50)) as pilot:
             await _plotted(app, pilot)
 
-            await pilot.press("ctrl+right")  # a third of the 24 h range
-            assert app.time_range == TimeRange(START + 8 * hour, END + 8 * hour)
-            await pilot.press("shift+left")  # a quarter
-            assert app.time_range == TimeRange(START + 2 * hour, END + 2 * hour)
+            await pilot.press("ctrl+right")  # a quarter of the 24 h range
+            assert app.time_range == TimeRange(START + 6 * hour, END + 6 * hour)
+            await pilot.press("ctrl+left")
+            assert app.time_range == DAY
 
-            await pilot.press("ctrl+up")  # zoom in by a third: 24 h -> 16 h, around the same centre
-            assert app.time_range == TimeRange(START + 6 * hour, END - 2 * hour)
+            await pilot.press("ctrl+up")  # zoom in by a quarter: 24 h -> 18 h, around the same centre
+            assert app.time_range == TimeRange(START + 3 * hour, END - 3 * hour)
             await pilot.press("ctrl+down")  # and back out
-            assert app.time_range == TimeRange(START + 2 * hour, END + 2 * hour)
+            assert app.time_range == DAY
 
-            await pilot.press("shift+up")  # by a quarter: 24 h -> 18 h
-            assert app.time_range.end - app.time_range.start == 18 * hour
-            await pilot.press("shift+down")
-            assert app.time_range == TimeRange(START + 2 * hour, END + 2 * hour)
+            for key in ("shift+left", "shift+right", "shift+up", "shift+down"):  # left to tmux
+                await pilot.press(key)
+            assert app.time_range == DAY
+
+    asyncio.run(main())
+
+
+def test_the_plot_shows_a_border_when_focused_like_the_option_list(nav_app):
+    app, _, _ = nav_app
+
+    async def main():
+        async with app.run_test(size=(160, 50)) as pilot:
+            while not isinstance(app.screen, must_app.MainScreen):
+                await pilot.pause(0.05)
+            await pilot.pause()
+            option_list = app.screen.query_one("OptionList")
+
+            option_list.focus()
+            await pilot.pause()
+            focused_list, blurred_plot = option_list.styles.border_top, app.plot_widget.styles.border_top
+
+            app.plot_widget.focus()
+            await pilot.pause()
+            blurred_list, focused_plot = option_list.styles.border_top, app.plot_widget.styles.border_top
+
+            assert focused_plot == focused_list and focused_plot[0] == "tall"
+            assert blurred_plot == blurred_list
+            assert focused_plot != blurred_plot
+
+    asyncio.run(main())
+
+
+def test_one_quick_zoom_gives_one_notification(nav_app):
+    app, fetches, _ = nav_app
+    messages = []
+    app.notify = lambda message, **kwargs: messages.append(message)
+
+    async def main():
+        async with app.run_test(size=(160, 50)) as pilot:
+            await _plotted(app, pilot)
+            messages.clear()
+
+            await pilot.press("minus")
+            await _settle(app, pilot)
+
+            assert len(fetches) == 2
+            assert len(messages) == 1 and messages[0].startswith("Reloaded 1 of 1 parameter(s)")
 
     asyncio.run(main())

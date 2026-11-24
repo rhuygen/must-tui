@@ -14,6 +14,7 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
+from textual.notifications import SeverityLevel
 from textual.reactive import var
 from textual.screen import Screen
 from textual.events import MouseScrollDown, MouseScrollUp, MouseDown, MouseUp, MouseMove
@@ -406,6 +407,9 @@ WHEEL_ZOOM_FACTOR = 1.25
 NAVIGATION_DEBOUNCE = 0.3
 """Seconds after the last pan/zoom before the new time range is committed: remembered, redrawn and fetched."""
 
+RELOAD_NOTICE_DELAY = 1.0
+"""Seconds a reload may take before "Reloading…" is shown; a quicker one only shows its result, one notification."""
+
 PLOT_TIME_TICKS = 5
 """Number of labelled ticks on the TUI plot's time axis, both ends included (plotext's own default count)."""
 
@@ -477,17 +481,14 @@ class TimeRangePlotter(PlotWidget, can_focus=True):
         Binding("plus,equals_sign", "navigate('zoom', 0.5)", "Zoom in"),
         Binding("minus", "navigate('zoom', 2)", "Zoom out"),
         Binding("0", "navigate('reset', 0)", "Parameter data range"),
-        # Smaller steps, by 1/3 (Ctrl) and 1/4 (Shift) of the duration; zooming out is the inverse of zooming in,
-        # so in/out cancel. Zoom uses the arrows: Ghostty takes Ctrl with +/-/0 for its font size, and Shift with
-        # +/- can't be told apart from plain + and _ on most layouts. Not in the footer, to keep it short.
-        Binding("ctrl+left", "navigate('pan', -1, 3)", "Pan left by 1/3", show=False),
-        Binding("ctrl+right", "navigate('pan', 1, 3)", "Pan right by 1/3", show=False),
-        Binding("shift+left", "navigate('pan', -1, 4)", "Pan left by 1/4", show=False),
-        Binding("shift+right", "navigate('pan', 1, 4)", "Pan right by 1/4", show=False),
-        Binding("ctrl+up", "navigate('zoom', 2, 3)", "Zoom in by 1/3", show=False),
-        Binding("ctrl+down", "navigate('zoom', 3, 2)", "Zoom out by 1/3", show=False),
-        Binding("shift+up", "navigate('zoom', 3, 4)", "Zoom in by 1/4", show=False),
-        Binding("shift+down", "navigate('zoom', 4, 3)", "Zoom out by 1/4", show=False),
+        # Smaller steps with Ctrl, by 1/4 of the duration; zooming out is the inverse of zooming in, so in/out cancel.
+        # Zoom uses the arrows: Ghostty takes Ctrl with +/-/0 for its font size. No Shift+arrows: tmux uses those
+        # (so they never reach the app there), and Shift with +/- can't be told apart from plain + and _ on most
+        # layouts. Not in the footer, to keep it short.
+        Binding("ctrl+left", "navigate('pan', -1, 4)", "Pan left by 1/4", show=False),
+        Binding("ctrl+right", "navigate('pan', 1, 4)", "Pan right by 1/4", show=False),
+        Binding("ctrl+up", "navigate('zoom', 3, 4)", "Zoom in by 1/4", show=False),
+        Binding("ctrl+down", "navigate('zoom', 4, 3)", "Zoom out by 1/4", show=False),
     ]
 
     class Navigate(Message):
@@ -776,6 +777,7 @@ class MUSTApp(App[None]):
         Binding("ctrl+r", "reset_parameter_cache", "Reset parameter cache", show=False),
         Binding("f6", "choose_time_range", "Choose time range (presets, data range, recent)", show=False),
         Binding("f7", "toggle_points_only", "Toggle lines / points only", show=False),
+        Binding("f8", "toggle_notifications", "Mute / unmute notifications (warnings and errors still show)", show=False),
     ]
 
     MARKERS = {
@@ -790,6 +792,9 @@ class MUSTApp(App[None]):
 
     points_only: var[bool] = var(False)
     """Plot the samples only (scatter), without connecting lines, in both plot backends (F7)."""
+
+    notifications_muted: var[bool] = var(False)
+    """Hide informational notifications, e.g. during a live demo (F8). Warnings and errors still show."""
 
     plot_maximized: var[bool] = var(False)
     """Whether the plot area (plot + its controls) is maximized, hiding the rest of the main screen."""
@@ -1268,19 +1273,27 @@ class MUSTApp(App[None]):
 
         time_range = self.time_range
         period = f"{format_datetime(time_range.start)} – {format_datetime(time_range.end)}"
-        self.notify(f"Reloading {len(names)} plotted parameter(s) for {period}…", title="Time range changed")
+        # Only announce a slow reload: otherwise every pan/zoom step gave two notifications, "Reloading…" right
+        # before "Reloaded…".
+        notice = asyncio.get_running_loop().call_later(
+            RELOAD_NOTICE_DELAY,
+            lambda: self.notify(f"Reloading {len(names)} plotted parameter(s) for {period}…", title="Time range changed"),
+        )
 
         reloaded: dict[str, tuple[list[datetime.datetime], list[float], TimeRange, bool]] = {}
         without_data: list[str] = []
         truncated_names: list[str] = []
-        for name in names:
-            timestamps, values, was_truncated = await self._fetch_parameter_data(name, time_range)
-            if timestamps and values:
-                reloaded[name] = (timestamps, values, time_range, was_truncated)
-                if was_truncated:
-                    truncated_names.append(name)
-            else:
-                without_data.append(name)
+        try:
+            for name in names:
+                timestamps, values, was_truncated = await self._fetch_parameter_data(name, time_range)
+                if timestamps and values:
+                    reloaded[name] = (timestamps, values, time_range, was_truncated)
+                    if was_truncated:
+                        truncated_names.append(name)
+                else:
+                    without_data.append(name)
+        finally:
+            notice.cancel()
 
         # Selecting a parameter or clearing the plot may have happened while fetching. Keep what was added
         # meanwhile (it was fetched for the new range already) and drop what was cleared.
@@ -1645,7 +1658,39 @@ class MUSTApp(App[None]):
         option_list.highlighted = idx - start
 
     def _update_sub_title(self) -> None:
-        self.sub_title = self.MARKERS[self.marker] + (" · points only" if self.points_only else "")
+        self.sub_title = (
+            self.MARKERS[self.marker]
+            + (" · points only" if self.points_only else "")
+            + (" · notifications muted" if self.notifications_muted else "")
+        )
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: SeverityLevel = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        """Like `App.notify()`, but drops informational notifications while they are muted (F8).
+
+        Widgets' `notify()` forwards to this, so it covers every notification in the app.
+        """
+
+        if self.notifications_muted and severity == "information":
+            return
+        super().notify(message, title=title, severity=severity, timeout=timeout, markup=markup)
+
+    def watch_notifications_muted(self, muted: bool) -> None:
+        self._update_sub_title()
+        if muted:
+            # Also remove the ones still on screen (warnings and errors included: a clean slate for the demo).
+            self.clear_notifications()
+
+    def action_toggle_notifications(self) -> None:
+        """Mute or unmute informational notifications; the header shows when they are muted."""
+        self.notifications_muted = not self.notifications_muted
 
     def watch_points_only(self) -> None:
         self._update_sub_title()

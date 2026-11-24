@@ -108,6 +108,16 @@ PlotWidget {
     height: 1fr;
 }
 
+/* The same focus border as the option list (Textual's OptionList default): dim when blurred, so the layout doesn't
+   shift, and highlighted while the plot has focus, i.e. while its pan/zoom keys work. */
+TimeRangePlotter {
+    border: tall $border-blurred;
+}
+
+TimeRangePlotter:focus {
+    border: tall $border;
+}
+
 #input-search {
 /*    border: solid white; */
     height: 3;

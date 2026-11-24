@@ -558,8 +558,27 @@ def test_reload_fetches_every_plotted_parameter_once_for_the_new_range(monkeypat
     assert app.plot_widget.data == [[5.0], [7.0]]
     assert app.plot_widget.xlimits == (app.time_range.start, app.time_range.end)
     assert app.plot_widget.ylimits is None  # auto-scaled: no manual Y range was locked
-    assert app.notifications[0].startswith(f"Reloading 2 plotted parameter(s) for {period[0]} – {period[1]}")
-    assert app.notifications[-1].startswith("Reloaded 2 of 2 parameter(s)")
+    assert len(app.notifications) == 1  # a quick reload: only its result, no "Reloading…" first
+    assert app.notifications[0].startswith(f"Reloaded 2 of 2 parameter(s) for {period[0]} – {period[1]}")
+
+
+def test_a_slow_reload_first_says_it_is_reloading(monkeypatch):
+    old = [dt.datetime(2025, 12, 2)]
+    app, _ = _app_for_reload(monkeypatch, [("A", old, [1.0])], {})
+    monkeypatch.setattr(must_app, "RELOAD_NOTICE_DELAY", 0.01)
+
+    async def slow_get_parameter_data(_ctx, _provider, name, start, end, paginated=False, truncated=None):
+        await asyncio.sleep(0.1)
+        yield {"content": [{"data": [{"date": str(_ms(2025, 10, 1, 12)), "value": 5.0}]}]}
+
+    monkeypatch.setattr(must_app, "get_parameter_data", slow_get_parameter_data)
+
+    asyncio.run(app._reload_plotted_parameters())
+
+    period = ("2025-10-01 00:00:00", "2025-10-02 00:00:00")
+    assert len(app.notifications) == 2
+    assert app.notifications[0].startswith(f"Reloading 1 plotted parameter(s) for {period[0]} – {period[1]}")
+    assert app.notifications[1].startswith("Reloaded 1 of 1 parameter(s)")
 
 
 def test_reload_removes_parameters_without_data_and_says_so(monkeypatch):
